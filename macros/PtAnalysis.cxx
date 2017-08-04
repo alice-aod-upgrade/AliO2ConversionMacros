@@ -18,12 +18,16 @@
 /// General Public License for more details at
 /// https://www.gnu.org/copyleft/gpl.html
 
+#include <chrono>
+using namespace std;
+using namespace chrono;
 #include "immintrin.h"
 #include <Entities/Particle.h>
 #include <Entities/Track.h>
 #include <Entities/Vertex.h>
 #include <O2AnalysisManager.h>
 #include <O2ESDAnalysisTask.h>
+#include <expression_templates/Histogram.hpp>
 #include <TFile.h>
 #include <TH1F.h>
 #include <TThread.h>
@@ -38,10 +42,12 @@ using Vertex_t = ecs::Vertex<>;
 // that was used in the original ESD files.
 class PtAnalysis : public O2ESDAnalysisTask<Vertex_t, Track_t, Mc_t> {
 public:
-  virtual ~PtAnalysis(){};
+  PtAnalysis(int number = 0) : mNumber(number) {}
+  ~PtAnalysis() {}
   // Gets called once.
   virtual void UserInit() {
-    mHistogram = TH1F("ESD", "Pt Efficieny, Flat, Vectorized", 600, -0.1, 3);
+    mHistogram = TH1F(TString::Format("thread %d", mNumber), "Pt Efficieny ",
+                      600, -0.1, 3);
   }
   // Gets called once per event.
   virtual void UserExec() {
@@ -51,30 +57,41 @@ public:
     //           << " tracks\n";
     for (int i = 0; i < event.getNumberOfTracks(); i++) {
       auto track = event.getTrack(i);
-      double McLabel = track.mcLabel();
+      int McLabel = track.mcLabel();
       auto mcTrack = event.getParticle(McLabel);
       mHistogram.Fill(track.pt() / mcTrack.pt());
     }
   }
-  virtual void finish() { mHistogram.Write(); }
+  virtual void finish() {
+    // Don't clog the output with duplicates.
+    if (mNumber == 0) {
+      mHistogram.Write();
+    }
+  }
 
 protected:
   // protected stuff goes here
 
 private:
   TH1F mHistogram;
+  int mNumber;
 };
 
 // our analysis object. By deriving from O2AnalysisTask the framework will
 // not build any events but call UserExec for each input file.
 class PtAnalysisFlat : public O2AnalysisTask {
 public:
+  PtAnalysisFlat(int number = 0) : mNumber(number) {}
+  ~PtAnalysisFlat() {}
   // Gets called once.
   virtual void UserInit() {
-    mHistogram = TH1F("flat", "Pt Efficieny, Flat, Vectorized", 600, -0.1, 3);
+    mHistogram = TH1F(TString::Format("flat, thread %d", mNumber),
+                      "Pt Efficieny, Flat", 600, -0.1, 3);
   }
   // Gets called once per event, which is a single file for this type.
   virtual void UserExec() {
+    high_resolution_clock::time_point begin, end;
+    begin =  high_resolution_clock::now();
     ecs::EntityCollection<Track_t> tracks(*(this->getHandler()));
     ecs::EntityCollection<Mc_t> particles(*(this->getHandler()));
     // std::cout << "This event contains " << getEvent().getNumberOfTracks()
@@ -85,14 +102,159 @@ public:
       auto mcTrack = particles[McLabel];
       mHistogram.Fill(track.pt() / mcTrack.pt());
     }
+    end = high_resolution_clock::now();
+    double duration = duration_cast<microseconds>( end - begin ).count();
+    std::cout << "Finished normal in \t" << duration << "ms"<<std::endl;
   }
-  virtual void finish() { mHistogram.Write(); }
+  virtual void finish() {
+    // Don't clog the output with duplicates.
+    if (mNumber == 0) {
+      mHistogram.Write();
+    }
+  }
 
 protected:
   // protected stuff goes here
 
 private:
   TH1F mHistogram;
+  int mNumber;
+};
+
+class PtAnalysisFlatAutovec : public O2AnalysisTask {
+public:
+  PtAnalysisFlatAutovec(int number = 0) : mNumber(number) {}
+  ~PtAnalysisFlatAutovec() {}
+  // Gets called once.
+  virtual void UserInit() {
+    mHistogram = Histogram(600, -0.1, 3);
+  }
+  // Gets called once per event, which is a single file for this type.
+  virtual void UserExec() {
+    high_resolution_clock::time_point begin, end;
+    begin =  high_resolution_clock::now();
+
+    //fetch our tracks (initializes the storage backend for the handler)
+    ecs::EntityCollection<Track_t> tracks(*(this->getHandler()));
+    //fetch our MonteCarlo particles.
+    ecs::EntityCollection<Mc_t> particles(*(this->getHandler()));
+
+    //grab the indices mapping tracks to particles, returns an Array/Valaray-like
+    //object.
+    auto track_indices = tracks.mcLabel();
+    //grab the track and particle Pt. Returns an automatically deduced 'Expression type'.
+    // this could be another Valaray or it could be (and currently is) an expression
+    // saying "the sqrt of (get<Px>^2 plus get<Py>^2)".
+    //
+    // The techincal return type would be:
+    //  ExpressionMap<Sqrt,
+    //   ExpressionMap<Sum,   <-- argument to sqrt
+    //     ExpressionMap<Mul, <-- first arg to Sum
+    //      Slice<float>,     <-- first arg to Mul = Px
+    //      Slice<float>      <-- Second arg to Mul = Px
+    //     >,
+    //     ExpressionMap<Mul, <-- Second Arg to sum
+    //      Slice<float>,     <-- First arg to Mul = Py
+    //      Slice<float>      <-- First arg to Mul = Py
+    //     >
+    //    >
+    //  >
+    //
+    // No data is read or computatin performed until the resulting expression gets indexed
+    // with operator[] or get_vec(). If get_vec is used it computes the resulting expression using
+    // SIMD expressions (SSE/AVX)
+    auto track_pt = tracks.pt();
+    auto particle_pt = particles.pt();
+
+    // gather returns another expression, telling the compiler that
+    // particle_pt[i] should be read as particle_pt[track_indices[i]].
+    // this again supports vectorization using gather instruction where available
+    // where they are not, it performs a regular scalar read.
+    //
+    // the division operator returns yet another expression and thus
+    // result is an expression itself.
+    auto result = track_pt/(particle_pt.gather(track_indices));
+    // up to this point, no computation has been performed.
+    // We can now use this expression to fill a histogram
+    // For the best result, we fill the histogram using our own class which
+    // evaluates 'result' in vector form and fills in parallel.
+    // it does so by using openMP for parralizing the code and the
+    // semi-auto vectorization operations supported by our expression system.
+    mHistogram.Fill(result);
+
+    // alternatively, we could use the map_expr funtion to call
+    // a fill operation on each element. This still evaluates the expr`
+    // in vector form but is not multithreaded because of the possible
+    // side effects of the function argument. Works with root histograms.
+    // map_expr(result, [this](double x){mHistogram.Fill(x);});
+
+    // Or, we can cast the result to a Varray object. A Varrary is an expression object that also
+    // stores it's own data in an array. it is like the Valaray object in the std library but
+    // it is made to work with the general expression framework presented here.
+    // Varray's can be constructed from expressions, when doing so they will evaluate the supplied expression
+    // using vectorized instructions and parallelization.
+    //
+    // This uses extra memory for storing the array of the result before reading it into a histogram
+    // Works with ROOT histograms.
+    // Varray<float> result = track_pt/(particle_pt.gather(track_indices));
+    // for(int i = 0; i < result.size(); i++){
+    //   mHistogram.Fill(result[i]);
+    // }
+    end = high_resolution_clock::now();
+    double duration = duration_cast<microseconds>( end - begin ).count();
+    std::cout << "Finished autovec in \t" << duration << "ms"<<std::endl;
+  }
+  virtual void finish() {
+    // Don't clog the output with duplicates.
+    if (mNumber == 0) {
+      //Create and write a root histogram from our custom histogram type.
+      mHistogram.createTH1I(TString::Format("flat auto, thread %d", mNumber),
+                        "flat auto").Write();
+      // mHistogram.Write();
+    }
+  }
+
+protected:
+  // protected stuff goes here
+
+private:
+  Histogram mHistogram;
+  int mNumber;
+};
+
+class PtAnalysisAutovec : public O2ESDAnalysisTask<Vertex_t, Track_t, Mc_t> {
+public:
+  PtAnalysisAutovec(int number = 0) : mNumber(number) {}
+  ~PtAnalysisAutovec() {}
+  // Gets called once.
+  virtual void UserInit() {
+    mHistogram = Histogram(600, -0.1, 3);
+  }
+  // Gets called once per event, which is a single file for this type.
+  virtual void UserExec() {
+    auto event = getEvent();
+
+    auto tracks = event.getTracks(); //returns a Slice that's  subslice
+    auto particles = event.getParticles(); //returns all particles from the file
+
+    mHistogram.Fill(tracks.pt()/(particles.pt().gather(tracks.mcLabel())));
+  }
+  virtual void finish() {
+    // Don't clog the output with duplicates.
+    if (mNumber == 0) {
+      //Create and write a root histogram from our custom histogram type.
+      mHistogram.createTH1I(TString::Format("auto, thread %d", mNumber),
+                        "auto").Write();
+      // mHistogram.Write();
+    }
+  }
+
+protected:
+  // protected stuff goes here
+
+private:
+  Histogram mHistogram;
+  int mNumber;
 };
 
 // our analysis object. By deriving from O2AnalysisTask the framework will
@@ -109,14 +271,31 @@ public:
   }
   // Gets called once per event, which is a single file for this type.
   virtual void UserExec() {
+    high_resolution_clock::time_point begin, end;
+    begin =  high_resolution_clock::now();
     ecs::EntityCollection<Track_t> tracks(*(this->getHandler()));
     ecs::EntityCollection<Mc_t> particles(*(this->getHandler()));
-    auto track_indices = tracks.get<ecs::track::mc::MonteCarloIndex>();
-    auto track_px = tracks.get<ecs::track::Px>();
-    auto track_py = tracks.get<ecs::track::Py>();
+    auto track_indices = tracks.get<ecs::track::mc::MonteCarloIndex>().data();
+    // ideal:
+    //  hist(tracks.pt()/(particles.pt()[track_indices]))
+    // auto vectorized/multithreaded.
+    // tracks.pt() returns an expression that is sqrt(px*px+py*py)
+    // same for particles.pt()
+    // expression indexed by a varr<int> gives a gather expression.
+    // divide the results for another expression.
+    // hist then takes an expression and evaluates it in an optimized fashion.
+    // and produces a histgram.
+    // the end result should be a single loop that uses vectorized instructions
+    // where possible and multithreads automatically.
+    //  The resulting histogram can then be added to a ROOT hist in O(nBins).
+    // The bulk compute will only be limited by the memory throughput and in some
+    // cases the compute.
 
-    auto particle_px = particles.get<ecs::particle::Px>();
-    auto particle_py = particles.get<ecs::particle::Py>();
+    auto track_px = tracks.get<ecs::track::Px>().data();
+    auto track_py = tracks.get<ecs::track::Py>().data();
+
+    auto particle_px = particles.get<ecs::particle::Px>().data();
+    auto particle_py = particles.get<ecs::particle::Py>().data();
 
     // // Define a vector type of 8 floats.
     typedef float v8f __attribute__((vector_size(32)));
@@ -145,7 +324,10 @@ public:
                   particle_py[label] * particle_py[label];
       mHistogram.Fill(sqrt(tpt2 / ppt2));
     }
-  }
+    end = high_resolution_clock::now();
+    double duration = duration_cast<microseconds>( end - begin ).count();
+    std::cout << "Finished explicit in \t" << duration << "ms"<<std::endl;
+   }
   virtual void finish() {
     // Don't clog the output with duplicates.
     if (mNumber == 0) {
@@ -169,13 +351,17 @@ int PtSpectrum(const char **files, int fileCount) {
     mgr.addFile(files[i]);
   }
 
-  for (int i = 0; i < 1024; i++) {
+  for (int i = 0; i < 64; i++) {
     mgr.createNewTask<PtAnalysisFlatVectorized>(i);
+    mgr.createNewTask<PtAnalysisFlat>(i);
+    mgr.createNewTask<PtAnalysis>(i);
+    mgr.createNewTask<PtAnalysisFlatAutovec>(i);
+    mgr.createNewTask<PtAnalysisAutovec>(i);
   }
   // Note the '&'! this has to be a reference otherwise we create a copy of
   // the newly created task and it will not be updated.
-  auto &task_flat = mgr.createNewTask<PtAnalysisFlat>();
-  auto &task_esd = mgr.createNewTask<PtAnalysis>();
+  // auto &task_flat = mgr.createNewTask<PtAnalysisFlat>();
+  // auto &task_esd = mgr.createNewTask<PtAnalysis>();
 
   // open a file to put the results in.
   auto file = TFile::Open("AnalysisResult.root", "RECREATE");

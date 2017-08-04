@@ -34,23 +34,32 @@ ConversionAnalysis::~ConversionAnalysis() {}
 void ConversionAnalysis::UserCreateOutputObjects() {}
 // per event
 void ConversionAnalysis::UserExec(Option_t *option) {
-  const AliESDEvent *event = dynamic_cast<AliESDEvent *>(InputEvent());
-  if (!event) {
-    AliError(TString::Format("Failed to fetch ESD event"));
-    return;
+
+  if (mCurrentTimestamp <= 20000000) {
+    const AliESDEvent *event = dynamic_cast<AliESDEvent *>(InputEvent());
+    if (!event) {
+      AliError(TString::Format("Failed to fetch ESD event"));
+      return;
+    }
+    // TODO: We can probably do this much faster by using math
+    Double_t mu = 25.0 / 20000.0;
+    double offset = 0;
+    while (0 == mEventsOnQueue) {
+      mEventsOnQueue = mRng.Poisson(mu);
+      offset += 25;
+    }
+    mCurrentTimestamp += offset;
+    if (mCurrentTimestamp > 20000000) {
+      AliError(TString::Format("hit 20ms"));
+    } else {
+      mConverter.addESDEvent(mCurrentTimestamp, event, MCEvent());
+    }
+    mEventsOnQueue -= 1;
   }
-  // TODO: We can probably do this much faster by using math
-  Double_t mu = 25.0 / 20000.0;
-  double offset = 0;
-  while (0 == mEventsOnQueue) {
-    mEventsOnQueue = mRng.Poisson(mu);
-    offset += 25;
-  }
-  mCurrentTimestamp += offset;
-  mConverter.addESDEvent(mCurrentTimestamp, event, MCEvent());
-  mEventsOnQueue -= 1;
+  AliError(TString::Format("total sim time: %f", mCurrentTimestamp));
 }
 // Cleanup
 void ConversionAnalysis::Terminate(Option_t *option) {
   mConverter.toFile("aod.bin");
+  AliError(TString::Format("total sim time: %f", mCurrentTimestamp));
 }
