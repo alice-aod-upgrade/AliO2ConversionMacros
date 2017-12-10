@@ -1,7 +1,7 @@
 #include <Entities/Vertex.h>
 #include <ecs/Entity.h>
 #include <ecs/EntityCollection.h>
-
+using namespace o2;
 using namespace ecs;
 using namespace vertex;
 int readNewEvents(const char *file) {

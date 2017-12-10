@@ -1,4 +1,4 @@
-/// \file PtSpectrum.Cxx
+ /// \file PtSpectrum.Cxx
 /// \brief A demonstration of how to use the new analysis framework
 ///
 /// Contains three different tasks, all computing the pt_efficieny. One
@@ -25,25 +25,27 @@ using namespace chrono;
 #include <Entities/Particle.h>
 #include <Entities/Track.h>
 #include <Entities/Vertex.h>
-#include <O2AnalysisManager.h>
-#include <O2ESDAnalysisTask.h>
-#include <expression_templates/Histogram.hpp>
+#include <AnalysisManager.h>
+#include <ESDAnalysisTask.h>
+#include <Histogram.h>
 #include <TFile.h>
 #include <TH1F.h>
 #include <TThread.h>
 
+using namespace o2;
+using namespace ecs;
 // What type of track and vertex we want to use for our events.
-using Track_t = ecs::Track<ecs::track::Pt, ecs::track::mc::MonteCarloIndex>;
-using Mc_t = ecs::Particle<ecs::particle::Px, ecs::particle::Py>;
-using Vertex_t = ecs::Vertex<>;
+using Track_t = Track<track::Pt, track::mc::MonteCarloIndex>;
+using Mc_t = Particle<particle::Px, particle::Py>;
+using Vertex_t = Vertex<>;
 
 // our analysis object. By deriving from O2ESDAnalysisTask the framework will
 // build events for us from datastreams using the same mapping of vertex->tracks
 // that was used in the original ESD files.
-class PtAnalysis : public O2ESDAnalysisTask<Vertex_t, Track_t, Mc_t> {
+class PtAnalysisO2 : public ESDAnalysisTask<Vertex_t, Track_t, Mc_t> {
 public:
-  PtAnalysis(int number = 0) : mNumber(number) {}
-  ~PtAnalysis() {}
+  PtAnalysisO2(int number = 0) : mNumber(number) {}
+  ~PtAnalysisO2() {}
   // Gets called once.
   virtual void UserInit() {
     mHistogram = TH1F(TString::Format("thread %d", mNumber), "Pt Efficieny ",
@@ -53,11 +55,9 @@ public:
   virtual void UserExec() {
     // get the current event as before.
     auto event = getEvent();
-    // std::cout << "This event contains " << getEvent().getNumberOfTracks()
-    //           << " tracks\n";
     for (int i = 0; i < event.getNumberOfTracks(); i++) {
       auto track = event.getTrack(i);
-      int McLabel = track.mcLabel();
+      auto McLabel = track.mcLabel();
       auto mcTrack = event.getParticle(McLabel);
       mHistogram.Fill(track.pt() / mcTrack.pt());
     }
@@ -77,12 +77,12 @@ private:
   int mNumber;
 };
 
-// our analysis object. By deriving from O2AnalysisTask the framework will
+// our analysis object. By deriving from AnalysisTask the framework will
 // not build any events but call UserExec for each input file.
-class PtAnalysisFlat : public O2AnalysisTask {
+class PtAnalysisO2Flat : public AnalysisTask {
 public:
-  PtAnalysisFlat(int number = 0) : mNumber(number) {}
-  ~PtAnalysisFlat() {}
+  PtAnalysisO2Flat(int number = 0) : mNumber(number) {}
+  ~PtAnalysisO2Flat() {}
   // Gets called once.
   virtual void UserInit() {
     mHistogram = TH1F(TString::Format("flat, thread %d", mNumber),
@@ -90,21 +90,14 @@ public:
   }
   // Gets called once per event, which is a single file for this type.
   virtual void UserExec() {
-    high_resolution_clock::time_point begin, end;
-    begin =  high_resolution_clock::now();
-    ecs::EntityCollection<Track_t> tracks(*(this->getHandler()));
-    ecs::EntityCollection<Mc_t> particles(*(this->getHandler()));
-    // std::cout << "This event contains " << getEvent().getNumberOfTracks()
-    //           << " tracks\n";
+    EntityCollection<Track_t> tracks(*(this->getHandler()));
+    EntityCollection<Mc_t> particles(*(this->getHandler()));
     for (int i = 0; i < tracks.size(); i++) {
       auto track = tracks[i];
       auto McLabel = track.mcLabel();
       auto mcTrack = particles[McLabel];
       mHistogram.Fill(track.pt() / mcTrack.pt());
     }
-    end = high_resolution_clock::now();
-    double duration = duration_cast<microseconds>( end - begin ).count();
-    std::cout << "Finished normal in \t" << duration << "ms"<<std::endl;
   }
   virtual void finish() {
     // Don't clog the output with duplicates.
@@ -121,23 +114,21 @@ private:
   int mNumber;
 };
 
-class PtAnalysisFlatAutovec : public O2AnalysisTask {
+class PtAnalysisO2FlatAutovec : public AnalysisTask {
 public:
-  PtAnalysisFlatAutovec(int number = 0) : mNumber(number) {}
-  ~PtAnalysisFlatAutovec() {}
+  PtAnalysisO2FlatAutovec(int number = 0) : mNumber(number) {}
+  ~PtAnalysisO2FlatAutovec() {}
   // Gets called once.
   virtual void UserInit() {
     mHistogram = Histogram(600, -0.1, 3);
   }
   // Gets called once per event, which is a single file for this type.
   virtual void UserExec() {
-    high_resolution_clock::time_point begin, end;
-    begin =  high_resolution_clock::now();
 
     //fetch our tracks (initializes the storage backend for the handler)
-    ecs::EntityCollection<Track_t> tracks(*(this->getHandler()));
+    EntityCollection<Track_t> tracks(*(this->getHandler()));
     //fetch our MonteCarlo particles.
-    ecs::EntityCollection<Mc_t> particles(*(this->getHandler()));
+    EntityCollection<Mc_t> particles(*(this->getHandler()));
 
     //grab the indices mapping tracks to particles, returns an Array/Valaray-like
     //object.
@@ -181,28 +172,6 @@ public:
     // it does so by using openMP for parralizing the code and the
     // semi-auto vectorization operations supported by our expression system.
     mHistogram.Fill(result);
-
-    // alternatively, we could use the map_expr funtion to call
-    // a fill operation on each element. This still evaluates the expr`
-    // in vector form but is not multithreaded because of the possible
-    // side effects of the function argument. Works with root histograms.
-    // map_expr(result, [this](double x){mHistogram.Fill(x);});
-
-    // Or, we can cast the result to a Varray object. A Varrary is an expression object that also
-    // stores it's own data in an array. it is like the Valaray object in the std library but
-    // it is made to work with the general expression framework presented here.
-    // Varray's can be constructed from expressions, when doing so they will evaluate the supplied expression
-    // using vectorized instructions and parallelization.
-    //
-    // This uses extra memory for storing the array of the result before reading it into a histogram
-    // Works with ROOT histograms.
-    // Varray<float> result = track_pt/(particle_pt.gather(track_indices));
-    // for(int i = 0; i < result.size(); i++){
-    //   mHistogram.Fill(result[i]);
-    // }
-    end = high_resolution_clock::now();
-    double duration = duration_cast<microseconds>( end - begin ).count();
-    std::cout << "Finished autovec in \t" << duration << "ms"<<std::endl;
   }
   virtual void finish() {
     // Don't clog the output with duplicates.
@@ -222,10 +191,10 @@ private:
   int mNumber;
 };
 
-class PtAnalysisAutovec : public O2ESDAnalysisTask<Vertex_t, Track_t, Mc_t> {
+class PtAnalysisO2Autovec : public ESDAnalysisTask<Vertex_t, Track_t, Mc_t> {
 public:
-  PtAnalysisAutovec(int number = 0) : mNumber(number) {}
-  ~PtAnalysisAutovec() {}
+  PtAnalysisO2Autovec(int number = 0) : mNumber(number) {}
+  ~PtAnalysisO2Autovec() {}
   // Gets called once.
   virtual void UserInit() {
     mHistogram = Histogram(600, -0.1, 3);
@@ -233,17 +202,15 @@ public:
   // Gets called once per event, which is a single file for this type.
   virtual void UserExec() {
     auto event = getEvent();
-
-    auto tracks = event.getTracks(); //returns a Slice that's  subslice
+    auto tracks = event.getTracks(); //returns all the tracks in this event.
     auto particles = event.getParticles(); //returns all particles from the file
-
     mHistogram.Fill(tracks.pt()/(particles.pt().gather(tracks.mcLabel())));
   }
   virtual void finish() {
     // Don't clog the output with duplicates.
     if (mNumber == 0) {
       //Create and write a root histogram from our custom histogram type.
-      mHistogram.createTH1I(TString::Format("auto, thread %d", mNumber),
+      mHistogram.createTH1I(TString::Format("error %d", mNumber),
                         "auto").Write();
       // mHistogram.Write();
     }
@@ -257,13 +224,13 @@ private:
   int mNumber;
 };
 
-// our analysis object. By deriving from O2AnalysisTask the framework will
+// our analysis object. By deriving from AnalysisTask the framework will
 // not build any events but call UserExec for each input file.
 // NOTE: Requires avx2!
-class PtAnalysisFlatVectorized : public O2AnalysisTask {
+class PtAnalysisO2FlatVectorized : public AnalysisTask {
 public:
-  PtAnalysisFlatVectorized(int number = 0) : mNumber(number) {}
-  ~PtAnalysisFlatVectorized() {}
+  PtAnalysisO2FlatVectorized(int number = 0) : mNumber(number) {}
+  ~PtAnalysisO2FlatVectorized() {}
   // Gets called once.
   virtual void UserInit() {
     mHistogram = TH1F(TString::Format("vectorized, thread %d", mNumber),
@@ -271,11 +238,10 @@ public:
   }
   // Gets called once per event, which is a single file for this type.
   virtual void UserExec() {
-    high_resolution_clock::time_point begin, end;
-    begin =  high_resolution_clock::now();
-    ecs::EntityCollection<Track_t> tracks(*(this->getHandler()));
-    ecs::EntityCollection<Mc_t> particles(*(this->getHandler()));
-    auto track_indices = tracks.get<ecs::track::mc::MonteCarloIndex>().data();
+  #ifdef __AVX2__
+    EntityCollection<Track_t> tracks(*(this->getHandler()));
+    EntityCollection<Mc_t> particles(*(this->getHandler()));
+    auto track_indices = tracks.get<track::mc::MonteCarloIndex>().data();
     // ideal:
     //  hist(tracks.pt()/(particles.pt()[track_indices]))
     // auto vectorized/multithreaded.
@@ -291,17 +257,16 @@ public:
     // The bulk compute will only be limited by the memory throughput and in some
     // cases the compute.
 
-    auto track_px = tracks.get<ecs::track::Px>().data();
-    auto track_py = tracks.get<ecs::track::Py>().data();
+    auto track_px = tracks.get<track::Px>().data();
+    auto track_py = tracks.get<track::Py>().data();
 
-    auto particle_px = particles.get<ecs::particle::Px>().data();
-    auto particle_py = particles.get<ecs::particle::Py>().data();
+    auto particle_px = particles.get<particle::Px>().data();
+    auto particle_py = particles.get<particle::Py>().data();
 
     // // Define a vector type of 8 floats.
     typedef float v8f __attribute__((vector_size(32)));
     int i;
     for (i = 0; i < tracks.size() - 8; i += 8) {
-      //
       auto indices = _mm256_loadu_si256((__m256i const *)(track_indices + i));
       v8f ppy = _mm256_i32gather_ps((float *)particle_py, indices, 4);
       v8f ppx = _mm256_i32gather_ps((float *)particle_px, indices, 4);
@@ -324,9 +289,7 @@ public:
                   particle_py[label] * particle_py[label];
       mHistogram.Fill(sqrt(tpt2 / ppt2));
     }
-    end = high_resolution_clock::now();
-    double duration = duration_cast<microseconds>( end - begin ).count();
-    std::cout << "Finished explicit in \t" << duration << "ms"<<std::endl;
+    #endif
    }
   virtual void finish() {
     // Don't clog the output with duplicates.
@@ -346,22 +309,24 @@ private:
 int PtSpectrum(const char **files, int fileCount) {
 
   // create the analysis manager
-  O2AnalysisManager mgr;
+  AnalysisManager mgr;
   for (int i = 0; i < fileCount; i++) {
     mgr.addFile(files[i]);
   }
 
-  for (int i = 0; i < 64; i++) {
-    mgr.createNewTask<PtAnalysisFlatVectorized>(i);
-    mgr.createNewTask<PtAnalysisFlat>(i);
-    mgr.createNewTask<PtAnalysis>(i);
-    mgr.createNewTask<PtAnalysisFlatAutovec>(i);
-    mgr.createNewTask<PtAnalysisAutovec>(i);
+  for (int i = 0; i < 512; i++) {
+  #ifdef __AVX2__
+    mgr.createNewTask<PtAnalysisO2FlatVectorized>(i);
+  #endif
+    mgr.createNewTask<PtAnalysisO2Flat>(i);
+    mgr.createNewTask<PtAnalysisO2>(i);
+    mgr.createNewTask<PtAnalysisO2Autovec>(i);
+    mgr.createNewTask<PtAnalysisO2FlatAutovec>(i);
   }
   // Note the '&'! this has to be a reference otherwise we create a copy of
   // the newly created task and it will not be updated.
-  // auto &task_flat = mgr.createNewTask<PtAnalysisFlat>();
-  // auto &task_esd = mgr.createNewTask<PtAnalysis>();
+  // auto &task_flat = mgr.createNewTask<PtAnalysisO2Flat>();
+  // auto &task_esd = mgr.createNewTask<PtAnalysisO2>();
 
   // open a file to put the results in.
   auto file = TFile::Open("AnalysisResult.root", "RECREATE");

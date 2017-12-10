@@ -39,7 +39,7 @@ private:
   TRandom2 mRng;
   double mCurrentTimestamp = 0.0f;
   unsigned mEventsOnQueue = 0;
-  ESDEventConverter mConverter;
+  o2::ESDEventConverter mConverter;
   // root specific
   ClassDef(ConversionAnalysis, 1);
 };

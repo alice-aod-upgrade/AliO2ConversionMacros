@@ -56,10 +56,10 @@ void ConversionAnalysis::UserExec(Option_t *option) {
     }
     mEventsOnQueue -= 1;
   }
-  AliError(TString::Format("total sim time: %f", mCurrentTimestamp));
+  // AliError(TString::Format("total sim time: %f", mCurrentTimestamp));
 }
 // Cleanup
 void ConversionAnalysis::Terminate(Option_t *option) {
   mConverter.toFile("aod.bin");
-  AliError(TString::Format("total sim time: %f", mCurrentTimestamp));
+  // AliError(TString::Format("total sim time: %f", mCurrentTimestamp));
 }
