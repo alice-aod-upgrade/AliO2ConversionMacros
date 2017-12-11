@@ -268,8 +268,10 @@ public:
     int i;
     for (i = 0; i < tracks.size() - 8; i += 8) {
       auto indices = _mm256_loadu_si256((__m256i const *)(track_indices + i));
-      v8f ppy = _mm256_i32gather_ps((float *)particle_py, indices, 4);
-      v8f ppx = _mm256_i32gather_ps((float *)particle_px, indices, 4);
+      //v8f ppy = _mm256_i32gather_ps((float *)particle_py, indices, 4); //replace these lines so that the code compiles
+      //v8f ppx = _mm256_i32gather_ps((float *)particle_px, indices, 4); //replace these lines so that the code compiles
+      v8f ppy = _mm256_loadu_ps((float *)particle_py);
+      v8f ppx = _mm256_loadu_ps((float *)particle_px);
       v8f ppt2 = (ppy * ppy + ppx * ppx);
       //
       v8f tpx = _mm256_loadu_ps((float *)track_px + i);
