@@ -210,7 +210,7 @@ public:
     // Don't clog the output with duplicates.
     if (mNumber == 0) {
       //Create and write a root histogram from our custom histogram type.
-      mHistogram.createTH1I(TString::Format("error %d", mNumber),
+      mHistogram.createTH1I(TString::Format("auto %d", mNumber),
                         "auto").Write();
       // mHistogram.Write();
     }
@@ -268,10 +268,8 @@ public:
     int i;
     for (i = 0; i < tracks.size() - 8; i += 8) {
       auto indices = _mm256_loadu_si256((__m256i const *)(track_indices + i));
-      //v8f ppy = _mm256_i32gather_ps((float *)particle_py, indices, 4); //replace these lines so that the code compiles
-      //v8f ppx = _mm256_i32gather_ps((float *)particle_px, indices, 4); //replace these lines so that the code compiles
-      v8f ppy = _mm256_loadu_ps((float *)particle_py);
-      v8f ppx = _mm256_loadu_ps((float *)particle_px);
+      v8f ppy = _mm256_i32gather_ps((float *)particle_py, indices, 4); //replace these lines so that the code compiles
+      v8f ppx = _mm256_i32gather_ps((float *)particle_px, indices, 4); //replace these lines so that the code compiles
       v8f ppt2 = (ppy * ppy + ppx * ppx);
       //
       v8f tpx = _mm256_loadu_ps((float *)track_px + i);
@@ -316,7 +314,7 @@ int PtSpectrum(const char **files, int fileCount) {
     mgr.addFile(files[i]);
   }
 
-  for (int i = 0; i < 512; i++) {
+  for (int i = 0; i < 1; i++) {
   #ifdef __AVX2__
     mgr.createNewTask<PtAnalysisO2FlatVectorized>(i);
   #endif
